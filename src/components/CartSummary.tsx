@@ -90,7 +90,11 @@ export function CartSummary({
                     type="number"
                     min="0"
                     value={item.quantity}
-                    onChange={(event) => onQuantity(item, Number(event.target.value))}
+                    onChange={(event) => {
+                      const sanitized = event.target.value.replace(/^0+(?=\d)/, '');
+                      event.target.value = sanitized;
+                      onQuantity(item, Number(sanitized));
+                    }}
                   />
                 </label>
                 <button aria-label={`Remove ${productMap.get(item.productId) ?? 'item'}`} onClick={() => onRemove(item)}>
