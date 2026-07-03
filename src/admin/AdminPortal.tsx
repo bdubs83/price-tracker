@@ -960,6 +960,17 @@ export function AdminPortal({
     onPrices(prices.map((row) => ids.has(row.id) ? { ...row, ...patch, lastUpdatedAt: new Date().toISOString() } : row));
   }
 
+  function deleteInactiveFilteredPriceRows() {
+    const rowsToDelete = selectedVendorPrices.filter((price) => !price.active);
+    if (!rowsToDelete.length) return;
+    const approved = window.confirm(
+      `Permanently delete ${rowsToDelete.length} inactive filtered price row${rowsToDelete.length === 1 ? '' : 's'} for ${selectedVendor?.vendorName ?? 'the selected vendor'}?\n\nThis removes the rows from the cloud database. Active rows will be kept.`,
+    );
+    if (!approved) return;
+    const ids = new Set(rowsToDelete.map((row) => row.id));
+    onPrices(prices.filter((row) => !ids.has(row.id)));
+  }
+
   function updateProduct(productId: string, patch: Partial<Product>) {
     onProducts(products.map((product) => product.id === productId ? { ...product, ...patch, updatedAt: new Date().toISOString() } : product));
   }
@@ -1597,6 +1608,7 @@ export function AdminPortal({
             <button onClick={addManualPrice}>Add row</button>
             <button onClick={() => updateFilteredPriceRows({ active: true }, 'Activate')}>Activate filtered</button>
             <button onClick={() => updateFilteredPriceRows({ active: false }, 'Deactivate')}>Deactivate filtered</button>
+            <button onClick={deleteInactiveFilteredPriceRows}>Delete inactive filtered</button>
             <button onClick={exportCsv}><Download size={16} /> Export CSV</button>
           </div>
         </div>
