@@ -1,0 +1,27 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function currentUser() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid));
+    }
+
+    function hasCurrentUser() {
+      return signedIn()
+        && firestore.exists(/databases/(default)/documents/users/$(request.auth.uid));
+    }
+
+    function isAdmin() {
+      return hasCurrentUser()
+        && currentUser().data.sessionExpiresAt > request.time
+        && currentUser().data.role == 'admin';
+    }
+
+    match /price-lists/{fileName} {
+      allow read, write: if isAdmin();
+    }
+  }
+}

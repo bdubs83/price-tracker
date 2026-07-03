@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function currentUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function hasCurrentUser() {
+      return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function isVerifiedMember() {
+      return hasCurrentUser()
+        && currentUser().data.sessionExpiresAt > request.time
+        && currentUser().data.role in ['member', 'admin'];
+    }
+
+    function isAdmin() {
+      return hasCurrentUser()
+        && currentUser().data.sessionExpiresAt > request.time
+        && currentUser().data.role == 'admin';
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow write: if isAdmin();
+
+      match /savedCarts/{cartId} {
+        allow read, write: if signedIn()
+          && request.auth.uid == uid
+          && isVerifiedMember();
+      }
+    }
+
+    match /approvedMembers/{email} {
+      allow read, write: if isAdmin();
+    }
+
+    match /admins/{email} {
+      allow read, write: if isAdmin();
+    }
+
+    match /vendors/{id} {
+      allow read: if isVerifiedMember();
+      allow write: if isAdmin();
+    }
+
+    match /products/{id} {
+      allow read: if isVerifiedMember();
+      allow write: if isAdmin();
+    }
+
+    match /vendorPriceItems/{id} {
+      allow read: if isVerifiedMember();
+      allow write: if isAdmin();
+    }
+
+    match /priceLists/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    match /priceHistory/{id} {
+      allow read, write: if isAdmin();
+    }
+
+    match /shippingRules/{id} {
+      allow read: if isVerifiedMember();
+      allow write: if isAdmin();
+    }
+
+    match /appSettings/{id} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
