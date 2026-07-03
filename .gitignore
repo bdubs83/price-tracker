@@ -30,6 +30,9 @@ functions/lib/
 scripts/__pycache__/
 *.pyc
 
+# Local design/reference scratch files
+icon-work/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
