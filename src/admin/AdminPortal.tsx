@@ -85,6 +85,7 @@ const realImportWarnings: ImportWarning[] = [];
 const maxPdfBytes = 18 * 1024 * 1024;
 const pdfWarningBytes = 10 * 1024 * 1024;
 const extractionTimeoutMs = 320_000;
+const newCatalogProductId = '__new_catalog_item__';
 
 const extractionNameCorrections: Array<[RegExp, string]> = [
   [/samaglutide/gi, 'Semaglutide'],
@@ -101,8 +102,41 @@ function searchableKey(value?: string) {
   return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
+function slugifyId(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/(.{1,40}).*/, '$1')
+    .replace(/-+$/g, '') || 'new-item';
+}
+
 function normalizeExtractedName(value: string) {
   return extractionNameCorrections.reduce((next, [pattern, replacement]) => next.replace(pattern, replacement), value).replace(/\s+/g, ' ').trim();
+}
+
+function isLiquidListing(...values: Array<string | undefined>) {
+  const key = searchableKey(values.filter(Boolean).join(' '));
+  return /(?:water|liquid|aceticacid|bacteriostatic|bacwater|sterilewater)/.test(key);
+}
+
+function normalizeLiquidAmount(value?: string) {
+  const normalized = normalizeExtractedAmount(value);
+  if (!normalized) return normalized;
+  return normalized.replace(/(\d+(?:\.\d+)?)\s*mg\b/i, '$1ml');
+}
+
+function uniqueProductId(baseName: string, existingProducts: Product[], queuedIds: Set<string>) {
+  const base = slugifyId(baseName);
+  let candidate = base;
+  let suffix = 2;
+  const existingIds = new Set(existingProducts.map((product) => product.id));
+  while (existingIds.has(candidate) || queuedIds.has(candidate) || candidate === newCatalogProductId) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  queuedIds.add(candidate);
+  return candidate;
 }
 
 function findProductForExtractedRow(row: ExtractedPriceRow, products: Product[]) {
@@ -670,19 +704,18 @@ export function AdminPortal({
 
   function addManualReviewRow() {
     const firstVendor = selectedVendor ?? vendors[0];
-    const firstProduct = products[0];
-    if (!firstVendor || !firstProduct) return;
+    if (!firstVendor) return;
     const now = new Date().toISOString();
     const id = `review-manual-${Date.now()}`;
     setReviewRows((rows) => [
       {
         id,
         vendorId: firstVendor.id,
-        productId: firstProduct.id,
-        vendorProductName: firstProduct.displayName,
+        productId: newCatalogProductId,
+        vendorProductName: '',
         sku: '',
         mgOrAmountPerVial: 'Needs review',
-        unitType: firstProduct.unitType,
+        unitType: 'other',
         vialsPerKit: 10,
         kitPrice: 0,
         currency: 'USD',
@@ -883,9 +916,8 @@ export function AdminPortal({
       });
       const data = result.data as ExtractPriceListResponse;
       const firstVendor = selectedVendor ?? vendors[0];
-      const fallbackProduct = products[0];
-      if (!firstVendor || !fallbackProduct) {
-        setExtractionStatus('Extraction finished, but no vendor/product is available to stage rows.');
+      if (!firstVendor) {
+        setExtractionStatus('Extraction finished, but no vendor is available to stage rows.');
         return;
       }
 
@@ -894,10 +926,11 @@ export function AdminPortal({
         const match = findProductForExtractedRow(row, products);
         const existingSkuPrice = findExistingVendorSkuPrice(row, prices, firstVendor.id);
         const existingSkuProduct = existingSkuPrice ? products.find((product) => product.id === existingSkuPrice.productId) : undefined;
-        const mappedProduct = existingSkuProduct ?? match.product ?? fallbackProduct;
+        const mappedProduct = existingSkuProduct ?? match.product;
         const rawName = row.vendorProductName || row.sku || `Extracted row ${index + 1}`;
         const correctedName = existingSkuPrice?.vendorProductName || (match.product ? match.product.displayName : match.correctedName || rawName);
-        const amount = normalizeExtractedAmount(row.mgOrAmountPerVial) || 'Needs review';
+        const liquidListing = isLiquidListing(rawName, correctedName, row.sku, mappedProduct?.displayName, mappedProduct?.masterName);
+        const amount = (liquidListing ? normalizeLiquidAmount(row.mgOrAmountPerVial) : normalizeExtractedAmount(row.mgOrAmountPerVial)) || 'Needs review';
         const vialsPerKit = Number(row.vialsPerKit) || 10;
         const kitPrice = Number(row.kitPrice) || 0;
         const importRuleWarnings = buildImportRuleWarnings({
@@ -920,11 +953,11 @@ export function AdminPortal({
         return {
           id: `review-${Date.now()}-${index}`,
           vendorId: firstVendor.id,
-          productId: mappedProduct.id,
+          productId: mappedProduct?.id ?? newCatalogProductId,
           vendorProductName: correctedName,
           sku: row.sku || 'AI-REVIEW',
           mgOrAmountPerVial: amount,
-          unitType: mappedProduct.unitType,
+          unitType: mappedProduct?.unitType ?? (liquidListing ? 'vial' : 'other'),
           vialsPerKit,
           kitPrice,
           currency: 'USD',
@@ -1015,9 +1048,15 @@ export function AdminPortal({
       setExtractionStatus(`Cannot publish ${invalidPriceRows.length} row${invalidPriceRows.length === 1 ? '' : 's'} with missing or zero kit price. Correct the price or reject the row first.`);
       return;
     }
-    const existingMatches = rowsToPublish.filter((row) => prices.some((price) => reviewRowMatchesExistingPrice(row, price))).length;
+    const newCatalogRows = rowsToPublish.filter((row) => row.productId === newCatalogProductId);
+    const invalidNewCatalogRows = newCatalogRows.filter((row) => !row.vendorProductName.trim());
+    if (invalidNewCatalogRows.length) {
+      setExtractionStatus(`Cannot publish ${invalidNewCatalogRows.length} new item row${invalidNewCatalogRows.length === 1 ? '' : 's'} without a vendor listing name.`);
+      return;
+    }
+    const existingMatches = rowsToPublish.filter((row) => row.productId !== newCatalogProductId && prices.some((price) => reviewRowMatchesExistingPrice(row, price))).length;
     const approved = window.confirm(
-      `Publish ${rowsToPublish.length} reviewed row${rowsToPublish.length === 1 ? '' : 's'} to ${selectedVendor?.vendorName ?? 'the selected vendor'}?\n\nExpected updates: ${existingMatches}\nExpected new rows: ${rowsToPublish.length - existingMatches}`,
+      `Publish ${rowsToPublish.length} reviewed row${rowsToPublish.length === 1 ? '' : 's'} to ${selectedVendor?.vendorName ?? 'the selected vendor'}?\n\nExpected updates: ${existingMatches}\nExpected new price rows: ${rowsToPublish.length - existingMatches}\nNew catalog items: ${newCatalogRows.length}`,
     );
     if (!approved) return;
     const ids = new Set(rowsToPublish.map((row) => row.id));
@@ -1025,9 +1064,34 @@ export function AdminPortal({
     const nextPrices = [...prices];
     const updatedPriceIds = new Set<string>();
     const newRows: VendorPriceItem[] = [];
+    const newProducts: Product[] = [];
+    const queuedProductIds = new Set<string>();
+    const newProductIdsByListing = new Map<string, string>();
 
     rowsToPublish.forEach((row) => {
-      const publishableRow = { ...row, active: true, kitPrice: Number(row.kitPrice), lastUpdatedAt: publishedAt };
+      let productId = row.productId;
+      if (row.productId === newCatalogProductId) {
+        const listingKey = searchableKey(row.vendorProductName);
+        productId = newProductIdsByListing.get(listingKey) ?? '';
+        if (!productId) {
+          productId = uniqueProductId(row.vendorProductName, products, queuedProductIds);
+          newProductIdsByListing.set(listingKey, productId);
+          const liquidListing = isLiquidListing(row.vendorProductName, row.sku, row.mgOrAmountPerVial);
+          newProducts.push({
+            id: productId,
+            masterName: row.vendorProductName.trim(),
+            displayName: row.vendorProductName.trim(),
+            aliases: [row.vendorProductName.trim(), row.sku ?? ''].filter(Boolean),
+            categories: liquidListing ? ['Waters / Reconstitution'] : ['Other / Needs Review'],
+            unitType: liquidListing ? 'vial' : row.unitType,
+            notes: `Created from ${selectedVendor?.vendorName ?? 'vendor'} PDF review for SKU ${row.sku || 'unspecified'}.`,
+            active: true,
+            createdAt: publishedAt,
+            updatedAt: publishedAt,
+          });
+        }
+      }
+      const publishableRow = { ...row, productId, active: true, kitPrice: Number(row.kitPrice), lastUpdatedAt: publishedAt };
       const existingIndex = nextPrices.findIndex((price) => !updatedPriceIds.has(price.id) && reviewRowMatchesExistingPrice(publishableRow, price));
       if (existingIndex >= 0) {
         const existingRow = nextPrices[existingIndex];
@@ -1039,11 +1103,12 @@ export function AdminPortal({
       newRows.push(publishableRow);
     });
 
+    if (newProducts.length) onProducts([...newProducts, ...products]);
     onPrices([...newRows, ...nextPrices]);
     setReviewRows((rows) => rows.filter((row) => !ids.has(row.id)));
     setSelectedReviewIds((current) => current.filter((id) => !ids.has(id)));
     setExtractionStatus(
-      `Published ${rowsToPublish.length} reviewed row${rowsToPublish.length === 1 ? '' : 's'} to ${selectedVendor?.vendorName ?? 'the selected vendor'}: ${updatedPriceIds.size} updated, ${newRows.length} new.`,
+      `Published ${rowsToPublish.length} reviewed row${rowsToPublish.length === 1 ? '' : 's'} to ${selectedVendor?.vendorName ?? 'the selected vendor'}: ${updatedPriceIds.size} updated, ${newRows.length} new, ${newProducts.length} catalog item${newProducts.length === 1 ? '' : 's'} added.`,
     );
   }
 
@@ -1594,14 +1659,24 @@ export function AdminPortal({
                           <select
                             value={row.productId}
                             onChange={(event) => {
+                              if (event.target.value === newCatalogProductId) {
+                                updateReviewRow(row.id, {
+                                  productId: newCatalogProductId,
+                                  unitType: isLiquidListing(row.vendorProductName, row.sku, row.mgOrAmountPerVial) ? 'vial' : 'other',
+                                });
+                                return;
+                              }
                               const product = productLookup.get(event.target.value);
+                              const liquidListing = isLiquidListing(product?.displayName, product?.masterName, row.vendorProductName, row.sku);
                               updateReviewRow(row.id, {
                                 productId: event.target.value,
                                 unitType: product?.unitType ?? row.unitType,
                                 vendorProductName: product?.displayName ?? row.vendorProductName,
+                                mgOrAmountPerVial: liquidListing ? normalizeLiquidAmount(row.mgOrAmountPerVial) : row.mgOrAmountPerVial,
                               });
                             }}
                           >
+                            <option value={newCatalogProductId}>New item - use vendor listing</option>
                             {products.map((product) => (
                               <option key={product.id} value={product.id}>
                                 {product.displayName}
