@@ -84,6 +84,7 @@ type ImportWarning = {
 const realImportWarnings: ImportWarning[] = [];
 const maxPdfBytes = 18 * 1024 * 1024;
 const pdfWarningBytes = 10 * 1024 * 1024;
+const extractionTimeoutMs = 320_000;
 
 const extractionNameCorrections: Array<[RegExp, string]> = [
   [/samaglutide/gi, 'Semaglutide'],
@@ -126,6 +127,16 @@ function findProductForExtractedRow(row: ExtractedPriceRow, products: Product[])
   return best?.score >= 80 ? { product: best.product, correctedName, score: best.score } : { product: undefined, correctedName, score: best?.score ?? 0 };
 }
 
+function findExistingVendorSkuPrice(row: ExtractedPriceRow, prices: VendorPriceItem[], vendorId: string) {
+  const skuKey = searchableKey(row.sku);
+  if (!skuKey) return undefined;
+  return prices.find((price) =>
+    price.vendorId === vendorId
+    && price.active
+    && searchableKey(price.sku) === skuKey,
+  );
+}
+
 function normalizeExtractedAmount(value?: string) {
   const label = displayAmountLabel(value);
   return label === 'Unspecified' ? value : label;
@@ -135,12 +146,26 @@ function normalizeSku(value?: string) {
   return (value ?? '').trim().toLowerCase();
 }
 
+function extractionErrorMessage(error: unknown) {
+  const code = typeof (error as { code?: unknown })?.code === 'string' ? String((error as { code: string }).code) : '';
+  const message = error instanceof Error ? error.message : String(error || '');
+  if (code.includes('deadline-exceeded') || message.includes('deadline-exceeded')) {
+    return 'PDF extraction timed out before the AI returned rows. Try the upload again, or use a smaller/simpler PDF and add any missed SKUs manually in the review queue.';
+  }
+  if (code.includes('resource-exhausted')) {
+    return message || 'PDF extraction hit an AI service limit. Try again in a few minutes.';
+  }
+  return message || 'PDF extraction failed.';
+}
+
 function reviewRowMatchesExistingPrice(reviewRow: VendorPriceItem, existingRow: VendorPriceItem) {
   if (reviewRow.vendorId !== existingRow.vendorId || reviewRow.productId !== existingRow.productId) return false;
 
   const reviewSku = normalizeSku(reviewRow.sku);
   const existingSku = normalizeSku(existingRow.sku);
+  const sameSku = Boolean(reviewSku && existingSku && reviewSku === existingSku);
   const sameAmount = amountKey(reviewRow.mgOrAmountPerVial, reviewRow.vialsPerKit) === amountKey(existingRow.mgOrAmountPerVial, existingRow.vialsPerKit);
+  if (sameSku) return true;
   if (!sameAmount) return false;
 
   return !reviewSku || !existingSku || reviewSku === existingSku;
@@ -293,6 +318,19 @@ function reviewSeverityLabel(severity: ReviewSeverity) {
   return 'OK';
 }
 
+function priceMatches(currentPrice: number, extractedPrice: number) {
+  return Math.abs(Number(currentPrice) - Number(extractedPrice)) < 0.01;
+}
+
+function formatReviewPrice(value: number) {
+  return `$${Number(value).toFixed(2)}`;
+}
+
+function formatReviewSpec(amount?: string, vialsPerKit = 10) {
+  const label = displayAmountLabel(amount);
+  return vialsPerKit === 10 ? label : `${label}, ${vialsPerKit} vials`;
+}
+
 function buildImportRuleWarnings({
   row,
   prices,
@@ -302,6 +340,9 @@ function buildImportRuleWarnings({
   vialsPerKit,
   kitPrice,
   vendorId,
+  existingSkuPrice,
+  rawName,
+  correctedName,
 }: {
   row: ExtractedPriceRow;
   prices: VendorPriceItem[];
@@ -311,35 +352,55 @@ function buildImportRuleWarnings({
   vialsPerKit: number;
   kitPrice: number;
   vendorId: string;
+  existingSkuPrice?: VendorPriceItem;
+  rawName: string;
+  correctedName: string;
 }) {
   const warnings: string[] = [];
   const skuKey = searchableKey(row.sku);
 
-  if (!product) warnings.push(`[HIGH] Product mapping needs review; best score ${matchScore}.`);
-  if (vialsPerKit !== 10) warnings.push(`[HIGH] Non-standard vial count detected: ${vialsPerKit}.`);
   if (kitPrice <= 0) warnings.push('[HIGH] Missing or zero price detected.');
+  if (!skuKey) warnings.push('[HIGH] No SKU was extracted. Verify this line item manually.');
 
   if (skuKey && product) {
     const conflictingProductIds = [...new Set(prices
-      .filter((price) => searchableKey(price.sku) === skuKey && price.productId !== product.id)
+      .filter((price) => price.vendorId === vendorId && searchableKey(price.sku) === skuKey && price.productId !== product.id)
       .map((price) => price.productId))];
     if (conflictingProductIds.length) {
       warnings.push(`[HIGH] SKU already exists under different product id(s): ${conflictingProductIds.join(', ')}.`);
     }
   }
 
-  if (product) {
-    const sameVendorSameAmount = prices.some((price) =>
-      price.vendorId === vendorId
-      && price.productId === product.id
-      && amountKey(price.mgOrAmountPerVial, price.vialsPerKit) === amountKey(amount, vialsPerKit),
-    );
-    if (sameVendorSameAmount) {
-      warnings.push('[LOW] Selected vendor already has this product/amount; verify if this should update an existing row.');
+  if (existingSkuPrice) {
+    const sameAmount = amountKey(existingSkuPrice.mgOrAmountPerVial, existingSkuPrice.vialsPerKit) === amountKey(amount, vialsPerKit);
+    const samePrice = priceMatches(existingSkuPrice.kitPrice, kitPrice);
+    const existingSpec = formatReviewSpec(existingSkuPrice.mgOrAmountPerVial, existingSkuPrice.vialsPerKit);
+    const extractedSpec = formatReviewSpec(amount, vialsPerKit);
+    const existingPrice = formatReviewPrice(existingSkuPrice.kitPrice);
+    const extractedPrice = formatReviewPrice(kitPrice);
+
+    if (sameAmount && samePrice) {
+      warnings.push(`[OK] SKU matched, price confirmed, existing listing. Kept verified listing "${existingSkuPrice.vendorProductName}".`);
+    } else if (sameAmount) {
+      warnings.push(`[LOW] SKU matched existing listing; price changed from ${existingPrice} to ${extractedPrice}.`);
+    } else {
+      warnings.push(`[MED] SKU matched existing listing, but size changed from ${existingSpec} to ${extractedSpec}. Verify as a new dose/vial size before publishing.`);
     }
+
+    if (searchableKey(rawName) !== searchableKey(correctedName)) {
+      warnings.push(`PDF listing read as "${rawName}"; using verified listing "${correctedName}".`);
+    }
+  } else {
+    warnings.push('[HIGH] New SKU for this vendor. No active listing matched this SKU; verify product, listing, amount, vials, and price before publishing.');
+    if (product && matchScore >= 80) {
+      warnings.push(`Catalog guess: ${product.displayName}.`);
+    } else {
+      warnings.push(`Product mapping needs review; best catalog score ${matchScore}.`);
+    }
+    if (vialsPerKit !== 10) warnings.push(`[MED] Non-standard vial count detected: ${vialsPerKit}.`);
   }
 
-  if (product && kitPrice > 0) {
+  if (!existingSkuPrice && product && kitPrice > 0) {
     const comparablePrices = prices
       .filter((price) =>
         price.active
@@ -357,6 +418,10 @@ function buildImportRuleWarnings({
       }
     }
   }
+
+  (row.warnings ?? []).forEach((warning) => {
+    warnings.push(`Extractor note: ${warning}`);
+  });
 
   return warnings;
 }
@@ -523,6 +588,7 @@ export function AdminPortal({
   );
   const highReviewRows = reviewRows.filter((row) => reviewSeverity(row.notes) === 'high').length;
   const mediumReviewRows = reviewRows.filter((row) => reviewSeverity(row.notes) === 'medium').length;
+  const lowReviewRows = reviewRows.filter((row) => reviewSeverity(row.notes) === 'low').length;
   const visibleProducts = useMemo(() => {
     const query = productSearch.trim().toLowerCase();
     if (!query) return products;
@@ -600,6 +666,35 @@ export function AdminPortal({
       },
       ...prices,
     ]);
+  }
+
+  function addManualReviewRow() {
+    const firstVendor = selectedVendor ?? vendors[0];
+    const firstProduct = products[0];
+    if (!firstVendor || !firstProduct) return;
+    const now = new Date().toISOString();
+    const id = `review-manual-${Date.now()}`;
+    setReviewRows((rows) => [
+      {
+        id,
+        vendorId: firstVendor.id,
+        productId: firstProduct.id,
+        vendorProductName: firstProduct.displayName,
+        sku: '',
+        mgOrAmountPerVial: 'Needs review',
+        unitType: firstProduct.unitType,
+        vialsPerKit: 10,
+        kitPrice: 0,
+        currency: 'USD',
+        active: false,
+        priceListId: `plist-manual-${Date.now()}`,
+        lastUpdatedAt: now,
+        notes: '[HIGH] Manually added during PDF review. Enter SKU, product, amount, vial count, and kit price before publishing.',
+      },
+      ...rows,
+    ]);
+    setSelectedReviewIds((ids) => [id, ...ids]);
+    setExtractionStatus('Added a blank SKU row to the current upload review. Fill it in before publishing.');
   }
 
   async function exportCsv() {
@@ -778,7 +873,7 @@ export function AdminPortal({
     try {
       const fileBase64 = await readFileAsBase64(file);
       const { httpsCallable } = await import('firebase/functions');
-      const extractPriceList = httpsCallable(firebaseFunctions, 'extractPriceListWithGemini');
+      const extractPriceList = httpsCallable(firebaseFunctions, 'extractPriceListWithGemini', { timeout: extractionTimeoutMs });
       const result = await extractPriceList({
         fileName: file.name,
         fileMimeType: file.type || 'application/pdf',
@@ -797,31 +892,31 @@ export function AdminPortal({
       let autoMappedCount = 0;
       const nextRows = data.rows.map((row, index): VendorPriceItem => {
         const match = findProductForExtractedRow(row, products);
-        const mappedProduct = match.product ?? fallbackProduct;
+        const existingSkuPrice = findExistingVendorSkuPrice(row, prices, firstVendor.id);
+        const existingSkuProduct = existingSkuPrice ? products.find((product) => product.id === existingSkuPrice.productId) : undefined;
+        const mappedProduct = existingSkuProduct ?? match.product ?? fallbackProduct;
         const rawName = row.vendorProductName || row.sku || `Extracted row ${index + 1}`;
-        const correctedName = match.product ? match.product.displayName : match.correctedName || rawName;
+        const correctedName = existingSkuPrice?.vendorProductName || (match.product ? match.product.displayName : match.correctedName || rawName);
         const amount = normalizeExtractedAmount(row.mgOrAmountPerVial) || 'Needs review';
         const vialsPerKit = Number(row.vialsPerKit) || 10;
         const kitPrice = Number(row.kitPrice) || 0;
         const importRuleWarnings = buildImportRuleWarnings({
           row,
           prices,
-          product: match.product,
+          product: mappedProduct,
           matchScore: match.score,
           amount,
           vialsPerKit,
           kitPrice,
           vendorId: firstVendor.id,
+          existingSkuPrice,
+          rawName,
+          correctedName,
         });
         const reviewNotes = [
-          `AI extraction confidence: ${Math.round((Number(row.confidence) || 0) * 100)}%.`,
-          match.product ? `Auto-mapped to ${mappedProduct.displayName}.` : '',
-          rawName !== correctedName ? `[MED] Name normalized from "${rawName}" to "${correctedName}".` : '',
           ...importRuleWarnings,
-          ...(row.warnings ?? []).map((warning) => `[LOW] ${warning}`),
-          'Verify product, amount, vial count, and price before publishing.',
         ].filter(Boolean);
-        if (match.product) autoMappedCount += 1;
+        if (existingSkuPrice || match.product) autoMappedCount += 1;
         return {
           id: `review-${Date.now()}-${index}`,
           vendorId: firstVendor.id,
@@ -849,7 +944,7 @@ export function AdminPortal({
       setSelectedMissingFromPdfIds(missingRows.map((row) => row.id));
       setExtractionStatus(`${data.parsedStatus}: ${nextRows.length} rows staged for admin review. ${autoMappedCount} auto-mapped to catalog products. ${missingRows.length} active row${missingRows.length === 1 ? '' : 's'} missing from this PDF.`);
     } catch (error) {
-      setExtractionStatus(error instanceof Error ? error.message : 'PDF extraction failed.');
+      setExtractionStatus(extractionErrorMessage(error));
     } finally {
       setIsExtracting(false);
     }
@@ -1429,7 +1524,7 @@ export function AdminPortal({
           </div>
           <div className={`admin-action-card ${reviewRows.length ? 'needs-review' : ''}`}>
             <strong>{reviewRows.length} staged rows</strong>
-            <span>{highReviewRows} high review, {mediumReviewRows} medium review.</span>
+            <span>{highReviewRows} high, {mediumReviewRows} medium, {lowReviewRows} low.</span>
           </div>
           <div className={`admin-action-card ${missingFromPdfRows.length ? 'needs-review' : ''}`}>
             <strong>{missingFromPdfRows.length} missing from PDF</strong>
@@ -1441,6 +1536,9 @@ export function AdminPortal({
           {isExtracting ? 'Extracting PDF...' : 'Upload vendor PDF for AI-assisted extraction review'}
           <input type="file" accept="application/pdf" disabled={isExtracting} onChange={(event) => event.target.files?.[0] && stagePdfExtraction(event.target.files[0])} />
         </label>
+        <div className="button-row">
+          <button onClick={addManualReviewRow}>Add SKU to review</button>
+        </div>
         <p className="subtle">AI extraction stages inactive rows for review. Map products and verify prices before publishing.</p>
         {extractionStatus && <p className="backup-status">{extractionStatus}</p>}
         {reviewRows.length > 0 && (
@@ -1451,6 +1549,7 @@ export function AdminPortal({
                 <p className="subtle">{selectedReviewIds.length} of {reviewRows.length} selected</p>
               </div>
               <div className="button-row">
+                <button onClick={addManualReviewRow}>Add SKU</button>
                 <button onClick={() => selectAllReviewRows(selectedReviewIds.length !== reviewRows.length)}>
                   {selectedReviewIds.length === reviewRows.length ? 'Clear selection' : 'Select all'}
                 </button>
