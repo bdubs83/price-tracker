@@ -55,7 +55,7 @@ export function calculateShipping(vendor: Vendor, subtotal: number) {
   return calculateShippingDetails(vendor, subtotal).cost;
 }
 
-function vendorShippingRule(vendor: Vendor) {
+export function vendorShippingRule(vendor: Vendor) {
   if (vendor.shippingRule?.type === 'weight_tier') return vendor.shippingRule;
   if (vendor.id === 'wanshun') return wanShunShippingRule;
   return undefined;

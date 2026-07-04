@@ -2,7 +2,7 @@ import { Download, Upload } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { categories } from '../data/seed';
 import { replaceApprovedMembersFromRows } from '../lib/auth/authUtils';
-import { amountKey } from '../lib/cartOptimizer/cartOptimizer';
+import { amountKey, vendorShippingRule } from '../lib/cartOptimizer/cartOptimizer';
 import { displayAmountLabel } from '../lib/pricing/amount';
 import type { AppSettings, AppUser, ApprovedMember, CsvImportSummary, PaymentMethod, Product, ProductCategory, Vendor, VendorPriceItem } from '../lib/types';
 
@@ -1160,6 +1160,28 @@ export function AdminPortal({
     return 'all_forms';
   }
 
+  function shippingRuleSummary(vendor: Vendor) {
+    const rule = vendorShippingRule(vendor);
+    if (!rule) return undefined;
+    const defaultService = rule.services.find((service) => service.id === rule.defaultServiceId) ?? rule.services[0];
+    const alternates = rule.services
+      .filter((service) => service.id !== defaultService?.id)
+      .map((service) => `${service.name} $${service.firstTierCost} + $${service.additionalTierCost}`)
+      .join('; ');
+    return [
+      `Weight tier: powder ${rule.powderGramsPerBox}g, water ${rule.waterGramsPerBox}g`,
+      defaultService ? `${defaultService.name} $${defaultService.firstTierCost} first ${rule.tierGrams}g + $${defaultService.additionalTierCost}` : '',
+      alternates,
+    ].filter(Boolean);
+  }
+
+  function vendorNotesValue(vendor: Vendor) {
+    if (vendor.id === 'wanshun' && vendor.notes?.toLowerCase().includes('shipping cost not listed')) {
+      return 'Verified vendor list notes all forms. Shipping uses weight-tier rule: powder 150g/box, water 250g/box. US Express $55 first 500g + $18/additional 500g; FedEx $75 first 500g + $18/additional 500g.';
+    }
+    return vendor.notes ?? '';
+  }
+
   return (
     <div className={`admin-shell ${adminDensity === 'compact' ? 'compact-density' : ''}`}>
       <nav className="admin-tabs" aria-label="Admin sections">
@@ -1909,6 +1931,7 @@ export function AdminPortal({
             <tbody>
               {visibleVendors.map((vendor) => {
                 const counts = priceCounts.get(vendor.id) ?? { total: 0, active: 0 };
+                const shippingSummary = shippingRuleSummary(vendor);
                 return (
                   <tr key={vendor.id}>
                     <td><strong>{vendor.vendorName}</strong></td>
@@ -1920,7 +1943,13 @@ export function AdminPortal({
                     </td>
                     <td>{counts.active}/{counts.total}</td>
                     <td>
-                      <input type="number" min="0" value={vendor.defaultShippingCost} onChange={(event) => updateVendor(vendor.id, { defaultShippingCost: Number(event.target.value) || 0 })} />
+                      {shippingSummary ? (
+                        <div className="stacked-cell">
+                          {shippingSummary.map((line) => <span key={line}>{line}</span>)}
+                        </div>
+                      ) : (
+                        <input type="number" min="0" value={vendor.defaultShippingCost} onChange={(event) => updateVendor(vendor.id, { defaultShippingCost: Number(event.target.value) || 0 })} />
+                      )}
                     </td>
                     <td>
                       <input
@@ -1940,7 +1969,7 @@ export function AdminPortal({
                       </select>
                     </td>
                     <td>
-                      <textarea value={vendor.notes ?? ''} onChange={(event) => updateVendor(vendor.id, { notes: event.target.value })} />
+                      <textarea value={vendorNotesValue(vendor)} onChange={(event) => updateVendor(vendor.id, { notes: event.target.value })} />
                     </td>
                   </tr>
                 );

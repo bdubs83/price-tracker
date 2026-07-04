@@ -1606,6 +1606,23 @@ footer {
   min-width: 980px;
 }
 
+.stacked-cell {
+  display: grid;
+  gap: 0.18rem;
+  min-width: 220px;
+}
+
+.stacked-cell span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
+.stacked-cell span:first-child {
+  color: var(--text);
+  font-weight: 700;
+}
+
 .vendor-health-table input,
 .vendor-health-table select,
 .vendor-health-table textarea,
