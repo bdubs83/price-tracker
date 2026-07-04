@@ -7,9 +7,21 @@ import type {
   Vendor,
   VendorBreakdown,
   VendorPriceItem,
+  WeightTierShippingRule,
 } from '../types';
 
 const money = (value: number) => Math.round(value * 100) / 100;
+const wanShunShippingRule: WeightTierShippingRule = {
+  type: 'weight_tier',
+  powderGramsPerBox: 150,
+  waterGramsPerBox: 250,
+  tierGrams: 500,
+  defaultServiceId: 'us-express',
+  services: [
+    { id: 'us-express', name: 'US Express', firstTierCost: 55, additionalTierCost: 18, deliveryEstimate: '10-15 days' },
+    { id: 'fedex', name: 'FedEx', firstTierCost: 75, additionalTierCost: 18, deliveryEstimate: 'Approximately 7 days' },
+  ],
+};
 
 function formatAmount(value: number) {
   return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(6)));
@@ -40,8 +52,69 @@ export function amountKey(value?: string, vialsPerKit = 10) {
 }
 
 export function calculateShipping(vendor: Vendor, subtotal: number) {
-  if (vendor.freeShippingThreshold && subtotal >= vendor.freeShippingThreshold) return 0;
-  return vendor.defaultShippingCost || 0;
+  return calculateShippingDetails(vendor, subtotal).cost;
+}
+
+function vendorShippingRule(vendor: Vendor) {
+  if (vendor.shippingRule?.type === 'weight_tier') return vendor.shippingRule;
+  if (vendor.id === 'wanshun') return wanShunShippingRule;
+  return undefined;
+}
+
+function isWaterItem(item: ComparisonItemRow) {
+  if (item.productCategories?.includes('Waters / Reconstitution')) return true;
+  const key = `${item.productName} ${item.vendorProductName ?? ''} ${item.sku ?? ''}`.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return /(?:water|aceticacid|bacteriostatic|bacwater|sterilewater)/.test(key);
+}
+
+export function calculateShippingDetails(vendor: Vendor, subtotal: number, items: ComparisonItemRow[] = []) {
+  if (vendor.freeShippingThreshold && subtotal >= vendor.freeShippingThreshold) {
+    return {
+      cost: 0,
+      serviceName: 'Free shipping',
+      deliveryEstimate: vendor.averageDeliveryTime,
+      totalWeightGrams: undefined,
+      tierCount: undefined,
+      alternateServices: [],
+    };
+  }
+  const rule = vendorShippingRule(vendor);
+  if (!rule || !items.length) {
+    return {
+      cost: vendor.defaultShippingCost || 0,
+      serviceName: undefined,
+      deliveryEstimate: vendor.averageDeliveryTime,
+      totalWeightGrams: undefined,
+      tierCount: undefined,
+      alternateServices: [],
+    };
+  }
+
+  const totalWeightGrams = items.reduce((sum, item) => {
+    const gramsPerBox = isWaterItem(item) ? rule.waterGramsPerBox : rule.powderGramsPerBox;
+    return sum + gramsPerBox * item.quantity;
+  }, 0);
+  const tierCount = Math.max(1, Math.ceil(totalWeightGrams / rule.tierGrams));
+  const options = rule.services.map((service) => ({
+    service,
+    cost: money(service.firstTierCost + Math.max(0, tierCount - 1) * service.additionalTierCost),
+  }));
+  const selected = options.find((option) => option.service.id === rule.defaultServiceId) ?? options[0];
+
+  return {
+    cost: selected.cost,
+    serviceName: selected.service.name,
+    deliveryEstimate: selected.service.deliveryEstimate,
+    totalWeightGrams,
+    tierCount,
+    alternateServices: options
+      .filter((option) => option.service.id !== selected.service.id)
+      .map((option) => ({
+        serviceName: option.service.name,
+        deliveryEstimate: option.service.deliveryEstimate,
+        cost: option.cost,
+      })),
+  };
 }
 
 export function calculateDiscount(vendor: Vendor, subtotal: number, paymentMethod?: string) {
@@ -75,7 +148,7 @@ export function buildVendorBreakdown(
   prices: VendorPriceItem[],
   filters: UserFilters = {},
 ): VendorBreakdown {
-  const productName = new Map(products.map((product) => [product.id, product.displayName]));
+  const productById = new Map(products.map((product) => [product.id, product]));
   const activePrices = prices.filter((price) => price.vendorId === vendor.id && price.active);
   const rows: ComparisonItemRow[] = [];
   const missingItems: string[] = [];
@@ -87,14 +160,16 @@ export function buildVendorBreakdown(
       return amountKey(item.mgOrAmountPerVial, item.vialsPerKit) === cartItem.amountKey;
     });
     if (!price) {
-      const label = productName.get(cartItem.productId) ?? cartItem.productId;
+      const label = productById.get(cartItem.productId)?.displayName ?? cartItem.productId;
       missingItems.push(cartItem.amountLabel ? `${label} ${cartItem.amountLabel}` : label);
       return;
     }
+    const product = productById.get(cartItem.productId);
     rows.push({
       productId: cartItem.productId,
       amountKey: cartItem.amountKey,
-      productName: productName.get(cartItem.productId) ?? price.vendorProductName,
+      productName: product?.displayName ?? price.vendorProductName,
+      productCategories: product?.categories,
       vendorProductName: price.vendorProductName,
       sku: price.sku,
       quantity: cartItem.quantity,
@@ -106,7 +181,8 @@ export function buildVendorBreakdown(
   });
 
   const subtotal = money(rows.reduce((sum, row) => sum + row.lineTotal, 0));
-  const shipping = rows.length ? calculateShipping(vendor, subtotal) : 0;
+  const shippingDetails = rows.length ? calculateShippingDetails(vendor, subtotal, rows) : undefined;
+  const shipping = shippingDetails?.cost ?? 0;
   const discount = calculateDiscount(vendor, subtotal, filters.paymentMethod);
 
   return {
@@ -115,6 +191,7 @@ export function buildVendorBreakdown(
     missingItems,
     subtotal,
     shipping,
+    shippingDetails,
     discount,
     finalTotal: money(subtotal + shipping - discount),
     paymentMethods: vendor.paymentMethods,
@@ -156,7 +233,8 @@ function splitSearch(
     return [...state.itemsByVendor.entries()].map(([vendorId, items]) => {
       const source = sourceByVendor.get(vendorId)!;
       const subtotal = money(items.reduce((sum, item) => sum + item.lineTotal, 0));
-      const shipping = calculateShipping(source.vendor, subtotal);
+      const shippingDetails = calculateShippingDetails(source.vendor, subtotal, items);
+      const shipping = shippingDetails.cost;
       const discount = calculateDiscount(source.vendor, subtotal, filters.paymentMethod);
       return {
         ...source,
@@ -164,6 +242,7 @@ function splitSearch(
         missingItems: [],
         subtotal,
         shipping,
+        shippingDetails,
         discount,
         finalTotal: money(subtotal + shipping - discount),
       };

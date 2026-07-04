@@ -1,12 +1,30 @@
 import { describe, expect, it } from 'vitest';
 import { realPrices, realProducts, realVendors } from '../../data/realSeed';
 import { seedPrices, seedProducts, seedVendors } from '../../data/seed';
-import { amountKey, calculateDiscount, calculateShipping, optimizeCart, vendorMatchesFilters } from './cartOptimizer';
+import { amountKey, calculateDiscount, calculateShipping, calculateShippingDetails, optimizeCart, vendorMatchesFilters } from './cartOptimizer';
 
 describe('cart optimizer', () => {
   it('calculates free shipping threshold', () => {
     expect(calculateShipping(seedVendors[0], 500)).toBe(0);
     expect(calculateShipping(seedVendors[0], 100)).toBe(18);
+  });
+
+  it('calculates WanShun weight-tier shipping for powder and water items', () => {
+    const vendor = { ...seedVendors[1], id: 'wanshun', defaultShippingCost: 0, freeShippingThreshold: undefined };
+    const powderOnly = calculateShippingDetails(vendor, 100, [
+      { productId: 'a', productName: 'BPC-157', quantity: 3, unitPrice: 10, lineTotal: 30 },
+    ]);
+    const powderAndWater = calculateShippingDetails(vendor, 100, [
+      { productId: 'a', productName: 'BPC-157', quantity: 2, unitPrice: 10, lineTotal: 20 },
+      { productId: 'b', productName: 'Bacteriostatic Water', productCategories: ['Waters / Reconstitution'], quantity: 1, unitPrice: 7, lineTotal: 7 },
+    ]);
+
+    expect(powderOnly.totalWeightGrams).toBe(450);
+    expect(powderOnly.cost).toBe(55);
+    expect(powderOnly.alternateServices[0].cost).toBe(75);
+    expect(powderAndWater.totalWeightGrams).toBe(550);
+    expect(powderAndWater.cost).toBe(73);
+    expect(powderAndWater.alternateServices[0].cost).toBe(93);
   });
 
   it('normalizes equivalent amount labels', () => {

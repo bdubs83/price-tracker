@@ -45,9 +45,25 @@ export type Vendor = {
   paymentMethods: PaymentMethod[];
   cryptoDiscountType: 'none' | 'percent' | 'fixed' | 'custom';
   cryptoDiscountValue?: number;
+  shippingRule?: WeightTierShippingRule;
   notes?: string;
   active: boolean;
   lastUpdatedAt: string;
+};
+
+export type WeightTierShippingRule = {
+  type: 'weight_tier';
+  powderGramsPerBox: number;
+  waterGramsPerBox: number;
+  tierGrams: number;
+  defaultServiceId: string;
+  services: Array<{
+    id: string;
+    name: string;
+    firstTierCost: number;
+    additionalTierCost: number;
+    deliveryEstimate: string;
+  }>;
 };
 
 export type ProductCategory =
@@ -123,6 +139,7 @@ export type ComparisonItemRow = {
   productId: string;
   amountKey?: string;
   productName: string;
+  productCategories?: ProductCategory[];
   vendorProductName?: string;
   sku?: string;
   quantity: number;
@@ -138,6 +155,17 @@ export type VendorBreakdown = {
   missingItems: string[];
   subtotal: number;
   shipping: number;
+  shippingDetails?: {
+    serviceName?: string;
+    deliveryEstimate?: string;
+    totalWeightGrams?: number;
+    tierCount?: number;
+    alternateServices: Array<{
+      serviceName: string;
+      deliveryEstimate: string;
+      cost: number;
+    }>;
+  };
   discount: number;
   finalTotal: number;
   paymentMethods: PaymentMethod[];

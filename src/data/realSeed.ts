@@ -36,7 +36,30 @@ export const realVendors: Vendor[] = [
     ],
     "cryptoDiscountType": "none",
     "cryptoDiscountValue": 0,
-    "notes": "Verified vendor list notes all forms. Shipping cost not listed in provided sheet.",
+    "shippingRule": {
+      "type": "weight_tier",
+      "powderGramsPerBox": 150,
+      "waterGramsPerBox": 250,
+      "tierGrams": 500,
+      "defaultServiceId": "us-express",
+      "services": [
+        {
+          "id": "us-express",
+          "name": "US Express",
+          "firstTierCost": 55,
+          "additionalTierCost": 18,
+          "deliveryEstimate": "10-15 days"
+        },
+        {
+          "id": "fedex",
+          "name": "FedEx",
+          "firstTierCost": 75,
+          "additionalTierCost": 18,
+          "deliveryEstimate": "Approximately 7 days"
+        }
+      ]
+    },
+    "notes": "Shipping: powder 150g/box, water 250g/box. US Express $55 first 500g + $18/additional 500g; FedEx $75 first 500g + $18/additional 500g.",
     "active": true,
     "lastUpdatedAt": "2026-06-28"
   },

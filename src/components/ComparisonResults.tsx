@@ -107,8 +107,14 @@ function VendorCard({ title, order, selectedPayment, coaReminderText }: { title:
       <div className="vendor-meta">
         <span>{paymentMethodsLabel(order.paymentMethods)}</span>
         <span>{order.vendor.region}</span>
-        <span>{order.deliveryEstimate ?? 'Delivery unknown'}</span>
+        <span>{order.shippingDetails?.deliveryEstimate ?? order.deliveryEstimate ?? 'Delivery unknown'}</span>
         <span>Includes shipping of {currency(order.shipping)}</span>
+        {order.shippingDetails?.serviceName && order.shippingDetails.totalWeightGrams && (
+          <span>{order.shippingDetails.serviceName}: {order.shippingDetails.totalWeightGrams}g billable weight</span>
+        )}
+        {order.shippingDetails?.alternateServices.map((service) => (
+          <span key={service.serviceName}>{service.serviceName}: {currency(service.cost)}, {service.deliveryEstimate}</span>
+        ))}
       </div>
       <p className="coa">{coaReminderText}</p>
       {order.items.length > 0 && <VendorActions order={order} selectedPayment={selectedPayment} />}
@@ -247,8 +253,14 @@ export function ComparisonResults({
               <div className="vendor-meta">
                 <span>{paymentMethodsLabel(selectedVendor.paymentMethods)}</span>
                 <span>{selectedVendor.vendor.region}</span>
-                <span>{selectedVendor.deliveryEstimate ?? 'Delivery unknown'}</span>
+                <span>{selectedVendor.shippingDetails?.deliveryEstimate ?? selectedVendor.deliveryEstimate ?? 'Delivery unknown'}</span>
                 {selectedHasFreeShipping && <span>Free shipping applied</span>}
+                {selectedVendor.shippingDetails?.serviceName && selectedVendor.shippingDetails.totalWeightGrams && (
+                  <span>{selectedVendor.shippingDetails.serviceName}: {selectedVendor.shippingDetails.totalWeightGrams}g billable weight</span>
+                )}
+                {selectedVendor.shippingDetails?.alternateServices.map((service) => (
+                  <span key={service.serviceName}>{service.serviceName}: {currency(service.cost)}, {service.deliveryEstimate}</span>
+                ))}
               </div>
               <div className="line-items compact-line-items vendor-detail-items">
                 {selectedVendor.items.map((item) => (
