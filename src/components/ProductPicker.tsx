@@ -138,7 +138,11 @@ export function ProductPicker({
               type="number"
               min="0"
               value={rowQuantity}
-              onChange={(event) => onQuantity(row.productId, row.amountKey, row.amountLabel, Number(event.target.value))}
+              onChange={(event) => {
+                const sanitized = event.target.value.replace(/^0+(?=\d)/, '');
+                event.target.value = sanitized;
+                onQuantity(row.productId, row.amountKey, row.amountLabel, Number(sanitized));
+              }}
             />
           </div>
         </td>
@@ -304,7 +308,11 @@ export function ProductPicker({
                           type="number"
                           min="0"
                           value={rowQuantity}
-                          onChange={(event) => onQuantity(row.productId, row.amountKey, row.amountLabel, Number(event.target.value))}
+                          onChange={(event) => {
+                const sanitized = event.target.value.replace(/^0+(?=\d)/, '');
+                event.target.value = sanitized;
+                onQuantity(row.productId, row.amountKey, row.amountLabel, Number(sanitized));
+              }}
                         />
                       </div>
                       <div className="compact-vendor-price-list">
